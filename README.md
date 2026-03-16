@@ -259,9 +259,7 @@ ansii/
 ├── README.md
 ├── .gitignore
 ├── art/                    ← Art files (txt, ansi, images)
-│   ├── gengar.txt          ← Braille Gengar art
-│   ├── agumon.txt
-│   └── SorenPortrait_FE9.png
+│   ├── asci.txt            ← Asci art
 └── editor/                 ← Editor source code
     ├── go.mod
     ├── go.sum
