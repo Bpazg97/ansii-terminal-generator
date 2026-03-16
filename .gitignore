@@ -1,0 +1,19 @@
+# ── Claude Code ──────────────────────────────────────
+.claude/
+
+# ── Go toolchain cache ────────────────────────────────
+vendor/
+
+# ── Art exports (generated, not source) ───────────────
+art/*.ansi
+art/*.png
+art/*.jpg
+
+# ── OS / editor cruft ────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
