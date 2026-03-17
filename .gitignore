@@ -6,6 +6,8 @@ vendor/
 
 # ── Art exports (generated, not source) ───────────────
 art/*.ansi
+art/*.ansii
+art/*.txt
 art/*.png
 art/*.jpg
 

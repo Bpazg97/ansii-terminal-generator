@@ -3,77 +3,77 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Styles
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#00ffff")).
-			Background(lipgloss.Color("#000080")).
+			Foreground(lipgloss.Color("14")).  // bright cyan
+			Background(lipgloss.Color("17")).  // dark blue (ANSI 256)
 			Padding(0, 2)
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#444444"))
+			BorderForeground(lipgloss.Color("240")) // dark gray
 
 	focusBorderStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#00ffff"))
+				BorderForeground(lipgloss.Color("14")) // bright cyan
 
 	sectionTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#ffff00"))
+				Foreground(lipgloss.Color("11")) // bright yellow
 
 	statusStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#222222")).
-			Foreground(lipgloss.Color("#aaaaaa")).
+			Background(lipgloss.Color("235")).
+			Foreground(lipgloss.Color("250")).
 			Padding(0, 1)
 
 	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#00ffff")).
-			Foreground(lipgloss.Color("#000000"))
+			Background(lipgloss.Color("14")).
+			Foreground(lipgloss.Color("0"))
 
 	importPromptStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#ffff00"))
+				Foreground(lipgloss.Color("11"))
 )
+
+// ── View ──────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
 	if m.showHelp {
 		return m.renderHelp()
 	}
 
+	filenameStr := m.filename
+	if filenameStr == "" {
+		filenameStr = "(unsaved)"
+	}
+	modMark := ""
+	if m.modified {
+		modMark = "*"
+	}
 	title := titleStyle.Render(" ANSI Art Editor ") + " " +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).
-			Render(fmt.Sprintf("[%s] %s", m.filename, modifiedMark(m.modified)))
+		lipgloss.NewStyle().Foreground(lipgloss.Color("242")).
+			Render(fmt.Sprintf("[%s]%s", filenameStr, modMark))
 
 	canvas := m.renderCanvas()
 	sidebar := m.renderSidebar()
-
 	content := lipgloss.JoinHorizontal(lipgloss.Top, canvas, sidebar)
-
 	status := m.renderStatus()
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		content,
-		status,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, title, content, status)
 }
 
-func modifiedMark(modified bool) string {
-	if modified {
-		return "*"
-	}
-	return ""
-}
+// ── Canvas ────────────────────────────────────────────────────────────────────
 
-// dimDot is the out-of-canvas-bounds marker, rendered once and reused.
-var dimDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#2a2a2a")).Render("·")
+var dimDot = lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render("·")
 
 func (m Model) renderCanvas() string {
 	vW, vH := m.canvasViewSize()
@@ -90,34 +90,24 @@ func (m Model) renderCanvas() string {
 			}
 		}
 		rowStr := sb.String()
-
-		// Pad to exactly vW visible columns.
-		// lipgloss.Width strips ANSI codes before measuring, so this is safe
-		// even when cells contain escape sequences.
 		if vis := lipgloss.Width(rowStr); vis < vW {
 			rowStr += strings.Repeat(" ", vW-vis)
 		}
 		rows = append(rows, rowStr)
 	}
 
-	textModeTag := ""
+	modeTag := ""
 	if m.textMode {
-		textModeTag = "  " + lipgloss.NewStyle().
-			Background(lipgloss.Color("#ffff00")).Foreground(lipgloss.Color("#000000")).Bold(true).
-			Render(" ✎ TEXT ")
+		modeTag = " " + lipgloss.NewStyle().
+			Background(lipgloss.Color("11")).Foreground(lipgloss.Color("0")).Bold(true).
+			Render("T")
 	}
-	label := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).
-		Render(fmt.Sprintf("Canvas %dx%d  cursor(%d,%d)%s",
-			m.canvas.Width, m.canvas.Height, m.cursorX, m.cursorY, textModeTag))
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color("242")).
+		Render(fmt.Sprintf("Canvas %dx%d  cur(%d,%d)", m.canvas.Width, m.canvas.Height, m.cursorX, m.cursorY)) +
+		modeTag
 
-	// Do NOT use Width() here — each row is already padded to vW so lipgloss
-	// does not need to reflow ANSI-coded content (which caused corruption).
 	content := label + "\n" + strings.Join(rows, "\n")
-	boxStyle := borderStyle
-	if m.focus == FocusCanvas {
-		boxStyle = focusBorderStyle
-	}
-	return boxStyle.Render(content)
+	return focusBorderStyle.Render(content)
 }
 
 func renderCell(cell Cell, isCursor bool) string {
@@ -127,10 +117,10 @@ func renderCell(cell Cell, isCursor bool) string {
 	}
 	s := lipgloss.NewStyle()
 	if cell.FG != ColorDefault {
-		s = s.Foreground(lipgloss.Color(ColorCode(cell.FG)))
+		s = s.Foreground(lipgloss.Color(fmt.Sprintf("%d", int(cell.FG))))
 	}
 	if cell.BG != ColorDefault {
-		s = s.Background(lipgloss.Color(ColorCode(cell.BG)))
+		s = s.Background(lipgloss.Color(fmt.Sprintf("%d", int(cell.BG))))
 	}
 	if isCursor {
 		s = s.Reverse(true)
@@ -138,262 +128,275 @@ func renderCell(cell Cell, isCursor bool) string {
 	return s.Render(string(ch))
 }
 
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+// The sidebar is compact: FG/BG display, current char, and tool selector.
+// Width(20) → content 20, border 2 → outer 22. Matches canvasViewSize sidebarW=22.
+
 func (m Model) renderSidebar() string {
-	sidebarW := 34
-
-	sections := []string{
-		m.renderColorSection(sidebarW),
-		m.renderCharSection(sidebarW),
-		m.renderToolSection(sidebarW),
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
-}
-
-func (m Model) renderColorSection(w int) string {
+	const w = 20
 	var sb strings.Builder
 
-	// FG/BG display
-	fgLabel := "FG: "
-	fgBlock := renderColorSwatch(m.fgColor, false) + " " + ColorName(m.fgColor)
-	bgLabel := "BG: "
-	bgBlock := renderColorSwatch(m.bgColor, false) + " " + ColorName(m.bgColor)
-
-	if m.focus == FocusFGColor {
-		fgLabel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00ffff")).Render("FG▶ ")
-	}
-	if m.focus == FocusBGColor {
-		bgLabel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00ffff")).Render("BG▶ ")
-	}
-
-	sb.WriteString(fgLabel + fgBlock + "\n")
-	sb.WriteString(bgLabel + bgBlock + "\n\n")
-
-	sb.WriteString(sectionTitleStyle.Render("Colors") + "\n")
-	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render("[f]FG [b]BG [d]Default")
-	sb.WriteString(hint + "\n")
-
-	// Color grid 8x2
-	for row := 0; row < 2; row++ {
-		for col := 0; col < 8; col++ {
-			colorIdx := Color(row*8 + col)
-			isCursor := m.colorCurX == col && m.colorCurY == row &&
-				(m.focus == FocusFGColor || m.focus == FocusBGColor)
-			sb.WriteString(renderColorSwatch(colorIdx, isCursor))
-		}
-		// Color names hint
-		if row == 0 {
-			sb.WriteString(" 0-7\n")
-		} else {
-			sb.WriteString(" 8-15\n")
-		}
-	}
-
-	boxStyle := borderStyle
-	if m.focus == FocusFGColor || m.focus == FocusBGColor {
-		boxStyle = focusBorderStyle
-	}
-	return boxStyle.Width(w).Render(sb.String())
-}
-
-func renderColorSwatch(c Color, selected bool) string {
-	s := lipgloss.NewStyle()
-	if c == ColorDefault {
-		s = s.Foreground(lipgloss.Color("#666666"))
-		if selected {
-			s = s.Reverse(true)
-		}
-		return s.Render("░░")
-	}
-	hex := ColorCode(c)
-	s = s.Background(lipgloss.Color(hex)).Foreground(lipgloss.Color(hex))
-	if selected {
-		s = lipgloss.NewStyle().
-			Background(lipgloss.Color("#ffffff")).
-			Foreground(lipgloss.Color(hex))
-	}
-	if selected {
-		return s.Render("▶◀")
-	}
-	return s.Render("██")
-}
-
-func (m Model) renderCharSection(w int) string {
-	var sb strings.Builder
-	sb.WriteString(sectionTitleStyle.Render("Characters") + "\n")
-
-	for rowIdx, row := range charPalette {
-		for colIdx, ch := range row {
-			isCursor := m.focus == FocusChars && m.charCurX == colIdx && m.charCurY == rowIdx
-			isCurrentChar := ch == m.currentChar
-
-			s := lipgloss.NewStyle()
-			if isCursor {
-				s = selectedStyle
-			} else if isCurrentChar {
-				s = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#ffff00")).
-					Bold(true)
-			}
-			sb.WriteString(s.Render(string(ch)))
-			sb.WriteRune(' ')
-		}
-		sb.WriteRune('\n')
-	}
+	// FG / BG
+	fgSwatch := renderColorSwatch(m.fgColor)
+	bgSwatch := renderColorSwatch(m.bgColor)
+	sb.WriteString(fmt.Sprintf("FG %s %s\n", fgSwatch, ColorName(m.fgColor)))
+	sb.WriteString(fmt.Sprintf("BG %s %s\n", bgSwatch, ColorName(m.bgColor)))
 
 	sb.WriteString("\n")
-	currentLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Render("Current: ")
-	currentChar := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorCode(m.fgColor))).
-		Background(lipgloss.Color(ColorCode(m.bgColor))).
-		Bold(true).
-		Render(string(m.currentChar))
-	sb.WriteString(currentLabel + currentChar)
 
-	boxStyle := borderStyle
-	if m.focus == FocusChars {
-		boxStyle = focusBorderStyle
+	// Current character with preview
+	cs := lipgloss.NewStyle().Bold(true)
+	if m.fgColor != ColorDefault {
+		cs = cs.Foreground(lipgloss.Color(fmt.Sprintf("%d", int(m.fgColor))))
 	}
-	return boxStyle.Width(w).Render(sb.String())
-}
+	if m.bgColor != ColorDefault {
+		cs = cs.Background(lipgloss.Color(fmt.Sprintf("%d", int(m.bgColor))))
+	}
+	charPreview := cs.Render(string(m.currentChar))
+	sb.WriteString("Char: " + charPreview + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("242")).Render("S+←→ cycle") + "\n")
 
-func (m Model) renderToolSection(w int) string {
-	tools := []Tool{ToolDraw, ToolErase, ToolFill, ToolEyedropper}
-	keys := []string{"d", "e", "f", "p"}
-	var parts []string
-	for i, t := range tools {
-		label := fmt.Sprintf("[%s]%s", keys[i], t.String())
-		if m.tool == t && m.focus == FocusCanvas {
-			label = selectedStyle.Render(label)
+	sb.WriteString("\n")
+
+	// Tools
+	sb.WriteString(sectionTitleStyle.Render("Tool") + "\n")
+	tools := []struct {
+		key  string
+		t    Tool
+	}{{"d", ToolDraw}, {"e", ToolErase}, {"f", ToolFill}}
+	for _, entry := range tools {
+		label := fmt.Sprintf("[%s]%s", entry.key, entry.t.String())
+		if m.tool == entry.t {
+			sb.WriteString(selectedStyle.Render(label))
 		} else {
-			label = lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa")).Render(label)
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(label))
 		}
-		parts = append(parts, label)
+		sb.WriteString("\n")
 	}
-	content := strings.Join(parts, " ")
-	return borderStyle.Width(w).Render(sectionTitleStyle.Render("Tools") + "\n" + content)
+
+	return borderStyle.Width(w).Render(sb.String())
 }
 
-// kh renders a key hint: key in bright cyan, description in dim gray.
-func kh(key, desc string) string {
-	k := lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true).Render(key)
-	d := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(desc)
-	return k + d
+func renderColorSwatch(c Color) string {
+	if c == ColorDefault {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("242")).Render("--")
+	}
+	idx := fmt.Sprintf("%d", int(c))
+	return lipgloss.NewStyle().Background(lipgloss.Color(idx)).Render("  ")
 }
+
+// ── Status bar ────────────────────────────────────────────────────────────────
 
 func (m Model) renderStatus() string {
-	// Import mode: show filename input prompt
-	if m.importMode {
-		var promptText, hintExt string
-		if m.importIsImg {
-			promptText = "Import image (PNG/JPG): "
-			hintExt = "e.g. /path/to/my-art.png"
-		} else {
-			promptText = "Import text/braille file: "
-			hintExt = "e.g. /path/to/my-art.txt"
+	// Install confirmation
+	if m.installConfirm {
+		outFile := changeExt(m.filename, ".ansi")
+		if outFile == "" {
+			outFile = "art.ansi"
 		}
-		cwd, _ := os.Getwd()
-		prompt := importPromptStyle.Render(promptText)
-		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Render("█")
-		hint := kh("[Enter]", " import   ") + kh("[Esc]", " cancel   ") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#444444")).Render(hintExt) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#333333")).Render("   cwd: "+cwd)
-		line1 := prompt + m.importInput + cursor
-		if m.importErrMsg != "" {
-			errLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#ff4444")).Bold(true).Render("  ✗ " + m.importErrMsg)
-			return statusStyle.Width(m.termW).Render(line1 + errLine + "\n" + hint)
-		}
+		warn := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+		line1 := warn.Render("INSTALL SPLASH") + "  " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("250")).
+				Render(fmt.Sprintf("→ ~/.config/ansii/splash.ansi + .bashrc/.zshrc  (export: %s)", outFile))
+		hint := kh("[Enter/y]", " confirm   ") + kh("[Esc/n]", " cancel")
 		return statusStyle.Width(m.termW).Render(line1 + "\n" + hint)
 	}
 
-	fgPrev := renderColorSwatch(m.fgColor, false)
-	bgPrev := renderColorSwatch(m.bgColor, false)
+	// Save prompt
+	if m.saveMode {
+		prompt := importPromptStyle.Render("Save (.ansii=project  .ansi=export): ")
+		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Render("█")
+		line1 := prompt + m.saveInput + cursor
+		if m.saveErrMsg != "" {
+			line1 += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render("  ✗ " + m.saveErrMsg)
+		}
+		var line2 string
+		if len(m.completions) > 0 {
+			line2 = renderCompletionBar(m.completions, m.compIdx) + "   " +
+				kh("[Tab]", " next  ") + kh("[S+Tab]", " prev  ") + kh("[Enter]", " confirm  ") + kh("[Esc]", " cancel")
+		} else {
+			line2 = kh("[Enter]", " save   ") + kh("[Esc]", " cancel   ") + kh("[Tab]", " complete path")
+		}
+		return statusStyle.Width(m.termW).Render(line1 + "\n" + line2)
+	}
 
-	pos := fmt.Sprintf("(%d,%d)", m.cursorX, m.cursorY)
-	info := fmt.Sprintf("Pos:%-8s FG:%s%-10s BG:%s%-10s Char:%s Tool:%-8s",
-		pos,
-		fgPrev, ColorName(m.fgColor),
-		bgPrev, ColorName(m.bgColor),
+	// Import prompt
+	if m.importMode {
+		var promptText string
+		switch {
+		case m.importASCII:
+			promptText = "Import image as ASCII (PNG/JPG): "
+		case m.importIsImg:
+			promptText = "Import image half-block (PNG/JPG): "
+		default:
+			promptText = "Import text file: "
+		}
+		cwd, _ := os.Getwd()
+		prompt := importPromptStyle.Render(promptText)
+		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Render("█")
+		line1 := prompt + m.importInput + cursor
+		if m.importErrMsg != "" {
+			line1 += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render("  ✗ " + m.importErrMsg)
+		}
+		var line2 string
+		if len(m.completions) > 0 {
+			line2 = renderCompletionBar(m.completions, m.compIdx) + "   " +
+				kh("[Tab]", " next  ") + kh("[S+Tab]", " prev  ") + kh("[Enter]", " import  ") + kh("[Esc]", " cancel")
+		} else {
+			line2 = kh("[Enter]", " import   ") + kh("[Esc]", " cancel   ") + kh("[Tab]", " complete   ") +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("cwd: "+cwd)
+		}
+		return statusStyle.Width(m.termW).Render(line1 + "\n" + line2)
+	}
+
+	// Color input prompt
+	if m.colorMode {
+		which := "FG"
+		if !m.colorModeFG {
+			which = "BG"
+		}
+		prompt := importPromptStyle.Render(fmt.Sprintf("%s color (0-255, d=default): ", which))
+		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Render("█")
+		line1 := prompt + m.colorInput + cursor
+		if m.colorErrMsg != "" {
+			line1 += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render("  ✗ " + m.colorErrMsg)
+		}
+		line2 := kh("[Enter]", " confirm   ") + kh("[Esc]", " cancel")
+		return statusStyle.Width(m.termW).Render(line1 + "\n" + line2)
+	}
+
+	// Normal status
+	fgSw := renderColorSwatch(m.fgColor)
+	bgSw := renderColorSwatch(m.bgColor)
+	info := fmt.Sprintf("(%d,%d)  FG:%s%-10s  BG:%s%-10s  Char:%s  Tool:%s",
+		m.cursorX, m.cursorY,
+		fgSw, ColorName(m.fgColor),
+		bgSw, ColorName(m.bgColor),
 		string(m.currentChar),
 		m.tool.String(),
 	)
 
 	var msg string
 	if m.statusMsg != "" {
-		msg = " | " + lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Render(m.statusMsg)
+		msg = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(m.statusMsg)
 	}
 
-	var keys string
-	if m.textMode {
-		keys = lipgloss.NewStyle().
-			Background(lipgloss.Color("#ffff00")).Foreground(lipgloss.Color("#000000")).Bold(true).
-			Render(" ✎ TEXT MODE ") + "  " +
-			kh("[↑↓←→]", " move   ") +
-			kh("[Enter]", " new line   ") +
-			kh("[Backspace]", " erase   ") +
-			kh("[Esc/q]", " exit text mode")
-	} else {
-		keys = kh("[t]", "Text   ") +
-			kh("[Tab]", "Panel   ") +
-			kh("[r]", "Import   ") +
-			kh("[g]", "Image   ") +
-			kh("[s]", "Save   ") +
-			kh("[x]", "Export   ") +
-			kh("[i]", "Install   ") +
-			kh("[?]", "Help   ") +
-			kh("[q]", "Quit")
+	// Key hints — single line, ≤78 visible chars on an 80-col terminal.
+	// Text mode does NOT change the hints; the canvas "T" badge is enough context.
+	textHint := ""
+	if m.tool == ToolDraw {
+		textHint = kh("[t]", "text ")
 	}
+	escHint := ""
+	if m.textMode {
+		escHint = kh("[Esc]", "exit-text  ")
+	}
+	keys := escHint +
+		textHint +
+		kh("[c]", "fg ") +
+		kh("[b]", "bg ") +
+		kh("[S+←→]", "char ") +
+		kh("[r]", "txt ") +
+		kh("[g]", "img ") +
+		kh("[a]", "ascii ") +
+		kh("[s]", "save ") +
+		kh("[i]", "install ") +
+		kh("[?]", "help ") +
+		kh("[q]", "quit")
 
 	return statusStyle.Width(m.termW).Render(info + msg + "\n" + keys)
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func renderCompletionBar(completions []string, idx int) string {
+	const maxVisible = 5
+	n := len(completions)
+	start := idx - 2
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxVisible
+	if end > n {
+		end = n
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	var parts []string
+	if start > 0 {
+		parts = append(parts, arrow.Render(fmt.Sprintf("◀%d", start)))
+	}
+	for i := start; i < end; i++ {
+		name := filepath.Base(completions[i])
+		if strings.HasSuffix(completions[i], "/") {
+			name += "/"
+		}
+		if i == idx {
+			parts = append(parts, selectedStyle.Render(" "+name+" "))
+		} else {
+			parts = append(parts, dim.Render(name))
+		}
+	}
+	if end < n {
+		parts = append(parts, arrow.Render(fmt.Sprintf("+%d▶", n-end)))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// kh renders a key hint: key in bright cyan, description in dim gray.
+func kh(key, desc string) string {
+	k := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true).Render(key)
+	d := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(desc)
+	return k + d
+}
+
+// ── Help screen ───────────────────────────────────────────────────────────────
+
 func helpLine(key, desc string) string {
-	k := lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true).Render(fmt.Sprintf("  %-22s", key))
-	d := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(desc)
+	k := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true).Render(fmt.Sprintf("  %-20s", key))
+	d := lipgloss.NewStyle().Foreground(lipgloss.Color("242")).Render(desc)
 	return k + d
 }
 
 func helpSection(title string) string {
-	return "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true).Render("  "+title) + "\n"
+	return "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true).Render("  "+title) + "\n"
 }
 
 func (m Model) renderHelp() string {
 	lines := []string{
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Bold(true).Render("  ANSI Art Editor — Help"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true).Render("  ANSI Art Editor — Help"),
 		"",
 		helpSection("NAVIGATION"),
 		helpLine("↑↓←→  /  h j k l", "Move cursor"),
-		helpLine("Tab / Shift+Tab", "Switch panel"),
-		helpSection("DRAWING  (canvas panel)"),
-		helpLine("Space / Enter", "Apply current tool"),
-		helpLine("Type any char", "Draw it and advance"),
-		helpLine("Backspace", "Erase cell and move left"),
+		helpSection("DRAWING  (Draw tool)"),
+		helpLine("Space / Enter", "Apply current tool at cursor"),
+		helpLine("Any printable key", "Draw char and advance (Draw tool only)"),
+		helpLine("Backspace", "Erase and move left"),
 		helpLine("Delete", "Erase in place"),
 		helpSection("TOOLS"),
-		helpLine("[d]  Draw", "Draw current char+colors"),
+		helpLine("[d]  Draw", "Place current char+colors"),
 		helpLine("[e]  Erase", "Clear a cell"),
-		helpLine("[f]  Fill", "Flood fill area"),
-		helpLine("[p]  Eyedrop", "Pick color+char from canvas"),
-		helpLine("[t]  Text mode", "All keys draw freely — Esc to exit"),
-		helpSection("COLOR PANEL  (Tab from canvas)"),
-		helpLine("↑↓←→", "Navigate palette"),
-		helpLine("[f]", "Select FG color"),
-		helpLine("[b]", "Select BG color"),
-		helpLine("[d]", "Reset to default (no color)"),
-		helpLine("Enter / Esc", "Apply and return to canvas"),
-		helpSection("CHARACTER PANEL  (Tab from colors)"),
-		helpLine("↑↓←→", "Navigate character palette"),
-		helpLine("Enter / Esc", "Select and return to canvas"),
+		helpLine("[f]  Fill", "Flood fill connected region"),
+		helpLine("[t]  Text mode", "Type freely — Esc to exit (Draw tool only)"),
+		helpSection("COLOR"),
+		helpLine("[c]", "Set FG color — type 0-255 or d for default"),
+		helpLine("[b]", "Set BG color — type 0-255 or d for default"),
+		helpSection("CHARACTER"),
+		helpLine("Shift+←  /  Shift+→", "Cycle through character palette"),
+		helpLine("Any printable key", "Draw that char directly (Draw mode)"),
 		helpSection("FILE"),
-		helpLine("[s] / Ctrl+S", "Save project  (.ansii JSON)"),
-		helpLine("[x]", "Export as .ansi  (raw escape codes)"),
-		helpLine("[i]", "Install as terminal splash screen"),
+		helpLine("[s] / Ctrl+S", "Save  (.ansii=project  .ansi=raw export)"),
+		helpLine("[i]", "Install as terminal splash  (asks confirmation)"),
 		helpSection("IMPORT"),
-		helpLine("[r]  Import text", "Load .txt / braille art into canvas"),
-		helpLine("[g]  Import image", "Load PNG/JPG → colored ANSI art"),
+		helpLine("[r]", "Import text file into canvas"),
+		helpLine("[g]", "Import PNG/JPG as half-block art (▀/▄)"),
+		helpLine("[a]", "Import PNG/JPG as ASCII art"),
 		"",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#444444")).Render("  Press any key to close"),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("  Press any key to close"),
 	}
-
 	return strings.Join(lines, "\n")
 }

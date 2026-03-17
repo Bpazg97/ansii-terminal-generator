@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
-// --- JSON save/load ---
+// ── JSON project format ──────────────────────────────────────────────────────
 
 type savedCell struct {
 	X    int    `json:"x"`
@@ -26,16 +27,15 @@ type savedCanvas struct {
 }
 
 func saveCanvas(c *Canvas, filename string) error {
-	var cells []savedCell
+	cells := make([]savedCell, 0) // explicit empty slice → JSON "[]", not "null"
 	for y := 0; y < c.Height; y++ {
 		for x := 0; x < c.Width; x++ {
 			cell := c.Cells[y][x]
-			if cell.Char == 0 || (cell.Char == ' ' && cell.FG == ColorDefault && cell.BG == ColorDefault) {
+			if cell.IsBlank() {
 				continue
 			}
 			cells = append(cells, savedCell{
-				X:    x,
-				Y:    y,
+				X: x, Y: y,
 				Char: string(cell.Char),
 				FG:   int(cell.FG),
 				BG:   int(cell.BG),
@@ -59,29 +59,29 @@ func loadCanvas(filename string) (*Canvas, error) {
 	if err != nil {
 		return nil, err
 	}
-	var sc savedCanvas
-	if err := json.Unmarshal(data, &sc); err != nil {
+	var saved savedCanvas // renamed from "sc" to avoid shadowing in the loop below
+	if err := json.Unmarshal(data, &saved); err != nil {
 		return nil, err
 	}
-	c := NewCanvas(sc.Width, sc.Height)
-	for _, sc := range sc.Cells {
-		r := []rune(sc.Char)
-		ch := ' '
-		if len(r) > 0 {
-			ch = r[0]
+	if saved.Width <= 0 || saved.Height <= 0 {
+		return nil, fmt.Errorf("invalid canvas dimensions: %dx%d", saved.Width, saved.Height)
+	}
+	c := NewCanvas(saved.Width, saved.Height)
+	for _, sc := range saved.Cells {
+		runes := []rune(sc.Char)
+		ch := rune(' ')
+		if len(runes) > 0 {
+			ch = runes[0]
 		}
-		c.Set(sc.X, sc.Y, Cell{
-			Char: ch,
-			FG:   Color(sc.FG),
-			BG:   Color(sc.BG),
-		})
+		c.Set(sc.X, sc.Y, Cell{Char: ch, FG: Color(sc.FG), BG: Color(sc.BG)})
 	}
 	return c, nil
 }
 
-// --- ANSI export ---
+// ── ANSI export ──────────────────────────────────────────────────────────────
 
-// exportANSI writes the canvas as ANSI escape codes.
+// exportANSI writes the canvas as a file of raw ANSI escape sequences.
+// Trailing blank cells are trimmed per row to keep the file small.
 func exportANSI(c *Canvas, filename string) error {
 	f, err := os.Create(filename)
 	if err != nil {
@@ -90,34 +90,26 @@ func exportANSI(c *Canvas, filename string) error {
 	defer f.Close()
 
 	w := bufio.NewWriter(f)
+	fmt.Fprint(w, "\033[0m") // reset before art so shell colors don't bleed in
+
 	for y := 0; y < c.Height; y++ {
-		prevFG := Color(-2) // sentinel
-		prevBG := Color(-2)
-		rowEmpty := true
-		for x := 0; x < c.Width; x++ {
-			if c.Cells[y][x].Char != ' ' || c.Cells[y][x].BG != ColorDefault {
-				rowEmpty = false
-				break
-			}
-		}
-		if rowEmpty {
+		lastX := lastNonBlank(c, y)
+		if lastX < 0 {
 			fmt.Fprintln(w)
 			continue
 		}
-
-		for x := 0; x < c.Width; x++ {
+		prevFG, prevBG := ColorDefault, ColorDefault // after \033[0m\n, terminal is at default
+		for x := 0; x <= lastX; x++ {
 			cell := c.Cells[y][x]
 			if cell.Char == 0 {
 				cell.Char = ' '
 			}
-
-			// Build ANSI code if colors changed
 			var codes []string
 			if cell.FG != prevFG {
 				if cell.FG == ColorDefault {
 					codes = append(codes, "39")
 				} else {
-					codes = append(codes, fgCode(cell.FG))
+					codes = append(codes, colorCode(cell.FG, true))
 				}
 				prevFG = cell.FG
 			}
@@ -125,53 +117,57 @@ func exportANSI(c *Canvas, filename string) error {
 				if cell.BG == ColorDefault {
 					codes = append(codes, "49")
 				} else {
-					codes = append(codes, bgCode(cell.BG))
+					codes = append(codes, colorCode(cell.BG, false))
 				}
 				prevBG = cell.BG
 			}
 			if len(codes) > 0 {
 				fmt.Fprintf(w, "\033[%sm", strings.Join(codes, ";"))
 			}
-			fmt.Fprintf(w, "%s", string(cell.Char))
+			fmt.Fprint(w, string(cell.Char))
 		}
-		fmt.Fprintf(w, "\033[0m\n")
+		fmt.Fprint(w, "\033[0m\n")
 	}
-
 	return w.Flush()
 }
 
-func fgCode(c Color) string {
-	if c < 8 {
-		return fmt.Sprintf("%d", 30+int(c))
+// lastNonBlank returns the x index of the rightmost visible cell in row y,
+// or -1 if the entire row is blank.
+func lastNonBlank(c *Canvas, y int) int {
+	last := -1
+	for x := 0; x < c.Width; x++ {
+		if !c.Cells[y][x].IsBlank() {
+			last = x
+		}
 	}
-	if c < 16 {
-		return fmt.Sprintf("%d", 90+int(c)-8)
-	}
-	// 256-color mode
-	return fmt.Sprintf("38;5;%d", int(c))
+	return last
 }
 
-func bgCode(c Color) string {
-	if c < 8 {
-		return fmt.Sprintf("%d", 40+int(c))
+// colorCode returns the ANSI SGR parameter string for color c.
+// isFG=true → foreground code, false → background code.
+func colorCode(c Color, isFG bool) string {
+	base, bright, ext := 30, 90, 38
+	if !isFG {
+		base, bright, ext = 40, 100, 48
 	}
-	if c < 16 {
-		return fmt.Sprintf("%d", 100+int(c)-8)
+	switch {
+	case c < 8:
+		return fmt.Sprintf("%d", base+int(c))
+	case c < 16:
+		return fmt.Sprintf("%d", bright+int(c)-8)
+	default:
+		return fmt.Sprintf("%d;5;%d", ext, int(c))
 	}
-	// 256-color mode
-	return fmt.Sprintf("48;5;%d", int(c))
 }
 
-// --- Import from plain text ---
+// ── Plain text import ────────────────────────────────────────────────────────
 
-// importFromText reads a plain UTF-8 text file (ASCII art, braille art, etc.)
-// and converts it to a canvas with default colors.
+// importFromText loads a UTF-8 text file into a canvas with default colors.
 func importFromText(filename string) (*Canvas, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	// Normalize line endings and trim trailing blank lines
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
@@ -179,7 +175,6 @@ func importFromText(filename string) (*Canvas, error) {
 	}
 	lines := strings.Split(content, "\n")
 
-	h := len(lines)
 	w := 0
 	for _, line := range lines {
 		if n := len([]rune(line)); n > w {
@@ -189,95 +184,112 @@ func importFromText(filename string) (*Canvas, error) {
 	if w == 0 {
 		return nil, fmt.Errorf("file has no content")
 	}
-
-	c := NewCanvas(w, h)
+	c := NewCanvas(w, len(lines))
 	for y, line := range lines {
-		for x, r := range []rune(line) {
-			if r != 0 && r != '\t' {
-				c.Set(x, y, Cell{Char: r, FG: ColorDefault, BG: ColorDefault})
+		col := 0
+		for _, r := range []rune(line) {
+			if r == '\t' {
+				col = (col/8 + 1) * 8 // advance to next 8-column tab stop
+				continue
 			}
+			if r != 0 {
+				c.Set(col, y, Cell{Char: r, FG: ColorDefault, BG: ColorDefault})
+			}
+			col++
 		}
 	}
 	return c, nil
 }
 
-// --- Shell install ---
+// ── Shell install ────────────────────────────────────────────────────────────
 
 func installToShell(ansiFile string) error {
-	// Make path absolute
-	if !strings.HasPrefix(ansiFile, "/") {
-		wd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		ansiFile = wd + "/" + ansiFile
+	absPath, err := filepath.Abs(ansiFile)
+	if err != nil {
+		return err
 	}
 
-	// Copy to ~/.config/ansii/splash.ansi
-	configDir := os.Getenv("HOME") + "/.config/ansii"
+	// Copy art to ~/.config/ansii/splash.ansi
+	configDir := filepath.Join(os.Getenv("HOME"), ".config", "ansii")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return err
 	}
-	splashPath := configDir + "/splash.ansi"
-	data, err := os.ReadFile(ansiFile)
+	splashPath := filepath.Join(configDir, "splash.ansi")
+	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return fmt.Errorf("could not read %s: %w", ansiFile, err)
+		return fmt.Errorf("could not read %s: %w", absPath, err)
 	}
 	if err := os.WriteFile(splashPath, data, 0644); err != nil {
 		return err
 	}
 
-	// Add to shell RC if not already present
-	catCmd := fmt.Sprintf("cat \"%s\"", splashPath)
-	marker := "# ansii-splash"
-	line := marker + "\n" + catCmd
-
-	shells := []string{
-		os.Getenv("HOME") + "/.bashrc",
-		os.Getenv("HOME") + "/.zshrc",
-	}
+	// Inject or update the splash block in .bashrc / .zshrc
+	const marker = "# ansii-splash"
+	catCmd := fmt.Sprintf(`cat "%s"`, splashPath)
 
 	added := false
-	for _, rc := range shells {
-		if _, err := os.Stat(rc); os.IsNotExist(err) {
+	for _, rc := range shellRCs() {
+		updated, changed, err := upsertShellBlock(rc, marker, catCmd)
+		if err != nil || !changed {
 			continue
 		}
-		content, err := os.ReadFile(rc)
-		if err != nil {
+		if err := os.WriteFile(rc, []byte(updated), 0644); err != nil {
 			continue
-		}
-		if strings.Contains(string(content), marker) {
-			// Replace existing block
-			lines := strings.Split(string(content), "\n")
-			var out []string
-			skip := false
-			for _, l := range lines {
-				if l == marker {
-					out = append(out, line)
-					skip = true
-					continue
-				}
-				if skip && strings.Contains(l, "cat") && strings.Contains(l, "splash.ansi") {
-					skip = false
-					continue
-				}
-				skip = false
-				out = append(out, l)
-			}
-			os.WriteFile(rc, []byte(strings.Join(out, "\n")), 0644)
-		} else {
-			f, err := os.OpenFile(rc, os.O_APPEND|os.O_WRONLY, 0644)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(f, "\n%s\n", line)
-			f.Close()
 		}
 		added = true
 	}
-
 	if !added {
 		return fmt.Errorf("no .bashrc or .zshrc found in HOME")
 	}
 	return nil
 }
+
+// shellRCs returns the RC file paths to check for shell splash installation.
+func shellRCs() []string {
+	home := os.Getenv("HOME")
+	return []string{
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".zshrc"),
+	}
+}
+
+// upsertShellBlock inserts or replaces the 2-line splash block (marker + cat cmd)
+// in the given RC file. Returns the updated content and whether a change occurred.
+func upsertShellBlock(rc, marker, catCmd string) (string, bool, error) {
+	data, err := os.ReadFile(rc)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	content := string(data)
+
+	if !strings.Contains(content, marker) {
+		// Append block, ensuring a trailing newline before it.
+		sep := "\n"
+		if strings.HasSuffix(content, "\n") {
+			sep = ""
+		}
+		return content + sep + marker + "\n" + catCmd + "\n", true, nil
+	}
+
+	// Replace: scan line by line for the marker, then swap in the new cat cmd.
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		if lines[i] != marker {
+			out = append(out, lines[i])
+			continue
+		}
+		out = append(out, marker, catCmd)
+		i++ // skip the marker line we just consumed
+		// Skip the old cat line if it references splash.ansi
+		if i < len(lines) && strings.Contains(lines[i], "splash.ansi") {
+			i++
+		}
+		i-- // compensate for the outer loop increment
+	}
+	return strings.Join(out, "\n"), true, nil
+}
+

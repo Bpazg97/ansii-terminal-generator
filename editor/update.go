@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -16,41 +18,136 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Import mode intercepts all keys
+		if m.installConfirm {
+			return m.handleInstallConfirmKey(msg)
+		}
+		if m.saveMode {
+			return m.handleSaveKey(msg)
+		}
 		if m.importMode {
 			return m.handleImportKey(msg)
+		}
+		if m.colorMode {
+			return m.handleColorInputKey(msg)
 		}
 		if m.showHelp {
 			m.showHelp = false
 			return m, nil
 		}
-		return m.handleKey(msg)
+		return m.handleCanvasKey(msg)
 	}
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch m.focus {
-	case FocusCanvas:
-		return m.handleCanvasKey(msg)
-	case FocusFGColor, FocusBGColor:
-		return m.handleColorKey(msg)
-	case FocusChars:
-		return m.handleCharKey(msg)
+// ── Install confirm ───────────────────────────────────────────────────────────
+
+func (m Model) handleInstallConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "enter", "y", "Y":
+		m.installConfirm = false
+		outFile := changeExt(m.filename, ".ansi")
+		if outFile == "" {
+			outFile = "art.ansi"
+		}
+		if err := exportANSI(m.canvas, outFile); err != nil {
+			m.statusMsg = fmt.Sprintf("Error exporting: %v", err)
+		} else if err := installToShell(outFile); err != nil {
+			m.statusMsg = fmt.Sprintf("Error installing: %v", err)
+		} else {
+			m.statusMsg = fmt.Sprintf("Installed! Restart terminal. (file: %s)", outFile)
+		}
+	case "esc", "escape", "n", "N":
+		m.installConfirm = false
+		m.statusMsg = "Install cancelled"
 	}
 	return m, nil
 }
+
+// ── Save prompt ───────────────────────────────────────────────────────────────
+
+func (m Model) handleSaveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "escape":
+		m.saveMode = false
+		m.saveInput = ""
+		m.saveErrMsg = ""
+		m.completions = nil
+		m.compIdx = 0
+	case "enter":
+		if m.saveInput == "" {
+			break
+		}
+		path := m.saveInput
+		isExport := strings.EqualFold(filepath.Ext(path), ".ansi")
+		var err error
+		if isExport {
+			err = exportANSI(m.canvas, path)
+		} else {
+			err = saveCanvas(m.canvas, path)
+		}
+		if err != nil {
+			m.saveErrMsg = err.Error()
+		} else {
+			if !isExport {
+				m.filename = path
+				m.modified = false
+			}
+			m.statusMsg = fmt.Sprintf("Saved → %s", path)
+			m.saveMode = false
+			m.saveInput = ""
+			m.saveErrMsg = ""
+			m.completions = nil
+			m.compIdx = 0
+		}
+	case "tab":
+		m.completions, m.compIdx = cycleCompletion(m.completions, m.compIdx, m.saveInput, +1)
+		if len(m.completions) > 0 {
+			m.saveInput = m.completions[m.compIdx]
+			m.saveErrMsg = ""
+		}
+	case "shift+tab":
+		m.completions, m.compIdx = cycleCompletion(m.completions, m.compIdx, m.saveInput, -1)
+		if len(m.completions) > 0 {
+			m.saveInput = m.completions[m.compIdx]
+			m.saveErrMsg = ""
+		}
+	case "backspace":
+		runes := []rune(m.saveInput)
+		if len(runes) > 0 {
+			m.saveInput = string(runes[:len(runes)-1])
+			m.saveErrMsg = ""
+			m.completions = nil
+			m.compIdx = 0
+		}
+	default:
+		r := []rune(msg.String())
+		if len(r) == 1 && r[0] >= 32 {
+			m.saveInput += string(r[0])
+			m.saveErrMsg = ""
+			m.completions = nil
+			m.compIdx = 0
+		}
+	}
+	return m, nil
+}
+
+// ── Import prompt ─────────────────────────────────────────────────────────────
 
 func (m Model) handleImportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
-
 	case "esc", "escape":
 		m.importMode = false
 		m.importInput = ""
 		m.importErrMsg = ""
-
+		m.importASCII = false
+		m.completions = nil
+		m.compIdx = 0
 	case "enter":
 		if m.importInput == "" {
 			break
@@ -60,13 +157,15 @@ func (m Model) handleImportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			c   *Canvas
 			err error
 		)
-		if m.importIsImg {
+		switch {
+		case m.importASCII:
+			c, err = importFromASCII(path, 80)
+		case m.importIsImg:
 			c, err = importFromImage(path, 80)
-		} else {
+		default:
 			c, err = importFromText(path)
 		}
 		if err != nil {
-			// Stay in import mode so the user can fix the path in-place.
 			m.importErrMsg = err.Error()
 		} else {
 			m.canvas = c
@@ -77,56 +176,99 @@ func (m Model) handleImportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.importMode = false
 			m.importInput = ""
 			m.importErrMsg = ""
+			m.importASCII = false
+			m.completions = nil
+			m.compIdx = 0
 		}
-
+	case "tab":
+		m.completions, m.compIdx = cycleCompletion(m.completions, m.compIdx, m.importInput, +1)
+		if len(m.completions) > 0 {
+			m.importInput = m.completions[m.compIdx]
+			m.importErrMsg = ""
+		}
+	case "shift+tab":
+		m.completions, m.compIdx = cycleCompletion(m.completions, m.compIdx, m.importInput, -1)
+		if len(m.completions) > 0 {
+			m.importInput = m.completions[m.compIdx]
+			m.importErrMsg = ""
+		}
 	case "backspace":
 		runes := []rune(m.importInput)
 		if len(runes) > 0 {
 			m.importInput = string(runes[:len(runes)-1])
 			m.importErrMsg = ""
+			m.completions = nil
+			m.compIdx = 0
 		}
-
 	default:
 		r := []rune(msg.String())
 		if len(r) == 1 && r[0] >= 32 {
 			m.importInput += string(r[0])
 			m.importErrMsg = ""
+			m.completions = nil
+			m.compIdx = 0
 		}
 	}
 	return m, nil
 }
 
-// resolvePath expands ~ and tries to find the file relative to common locations.
-func resolvePath(p string) string {
-	// Expand ~/
-	if len(p) >= 2 && p[:2] == "~/" {
-		home, _ := os.UserHomeDir()
-		p = home + p[1:]
-	}
-	// If file exists as-is, use it directly.
-	if _, err := os.Stat(p); err == nil {
-		return p
-	}
-	// Try relative to the executable's parent directory (project root).
-	if exe, err := os.Executable(); err == nil {
-		projectRoot := filepath.Dir(filepath.Dir(exe)) // editor/../
-		candidate := filepath.Join(projectRoot, p)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+// ── Color input prompt ────────────────────────────────────────────────────────
+
+// handleColorInputKey handles the inline color-pick prompt.
+// Accepts: digits (0-255), "d" for default, Enter to confirm, Esc to cancel.
+func (m Model) handleColorInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc", "escape":
+		m.colorMode = false
+		m.colorInput = ""
+		m.colorErrMsg = ""
+	case "enter":
+		raw := strings.TrimSpace(m.colorInput)
+		var color Color
+		switch strings.ToLower(raw) {
+		case "", "d", "default", "-1":
+			color = ColorDefault
+		default:
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 0 || n > 255 {
+				m.colorErrMsg = fmt.Sprintf("'%s' is not valid (0-255 or d)", raw)
+				return m, nil
+			}
+			color = Color(n)
 		}
-		// Also try art/ subdirectory
-		candidate2 := filepath.Join(projectRoot, "art", filepath.Base(p))
-		if _, err := os.Stat(candidate2); err == nil {
-			return candidate2
+		if m.colorModeFG {
+			m.fgColor = color
+			m.statusMsg = fmt.Sprintf("FG → %s", ColorName(color))
+		} else {
+			m.bgColor = color
+			m.statusMsg = fmt.Sprintf("BG → %s", ColorName(color))
+		}
+		m.colorMode = false
+		m.colorInput = ""
+		m.colorErrMsg = ""
+	case "backspace":
+		runes := []rune(m.colorInput)
+		if len(runes) > 0 {
+			m.colorInput = string(runes[:len(runes)-1])
+			m.colorErrMsg = ""
+		}
+	default:
+		r := []rune(msg.String())
+		if len(r) == 1 && (r[0] >= '0' && r[0] <= '9' || r[0] == 'd' || r[0] == 'D' || r[0] == '-') {
+			m.colorInput += string(r[0])
+			m.colorErrMsg = ""
 		}
 	}
-	return p // return as-is; error will be reported by caller
+	return m, nil
 }
+
+// ── Canvas key handler ────────────────────────────────────────────────────────
 
 func (m Model) handleCanvasKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	vW, vH := m.canvasViewSize()
 
-	// TEXT MODE: all printable chars draw freely; only special keys are intercepted.
 	if m.textMode {
 		return m.handleTextKey(msg, vW, vH)
 	}
@@ -166,98 +308,94 @@ func (m Model) handleCanvasKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		m.tool = ToolFill
 		m.statusMsg = "Tool: Fill — move cursor and press Space/Enter to fill"
-	case "p":
-		m.tool = ToolEyedropper
-		m.statusMsg = "Tool: Eyedropper — press Space/Enter to pick color+char"
 
-	// Draw / apply tool
+	// Apply tool
 	case " ", "enter":
 		m = m.applyTool(m.cursorX, m.cursorY)
 
-	// Erase with backspace
+	// Erase
 	case "backspace", "delete":
-		m.canvas.Set(m.cursorX, m.cursorY, Cell{Char: ' ', FG: ColorDefault, BG: ColorDefault})
+		m.canvas.Set(m.cursorX, m.cursorY, BlankCell)
 		m.modified = true
 		if msg.String() == "backspace" && m.cursorX > 0 {
 			m.cursorX--
 		}
 
-	// Panel switching
-	case "tab":
-		m.focus = FocusFGColor
-		m.fgSelecting = true
-	case "shift+tab":
-		m.focus = FocusChars
+	// Color prompts
+	case "c":
+		m.colorMode = true
+		m.colorModeFG = true
+		m.colorInput = ""
+		m.colorErrMsg = ""
+		m.statusMsg = ""
+	case "b":
+		m.colorMode = true
+		m.colorModeFG = false
+		m.colorInput = ""
+		m.colorErrMsg = ""
+		m.statusMsg = ""
+
+	// Cycle character palette with Shift+Arrow (no conflict with drawing chars)
+	case "shift+left":
+		m.currentChar = prevChar(m.currentChar)
+	case "shift+right":
+		m.currentChar = nextChar(m.currentChar)
+
+	// Text mode
+	case "t":
+		if m.tool == ToolDraw {
+			m.textMode = true
+			m.textModeStartX = m.cursorX
+			m.statusMsg = ""
+		}
 
 	// File ops
 	case "s", "ctrl+s":
-		if m.filename == "" {
-			m.filename = "art.ansii"
+		defaultName := m.filename
+		if defaultName == "" {
+			defaultName = "art.ansii"
 		}
-		if err := saveCanvas(m.canvas, m.filename); err != nil {
-			m.statusMsg = fmt.Sprintf("Error saving: %v", err)
-		} else {
-			m.modified = false
-			m.statusMsg = fmt.Sprintf("Saved → %s", m.filename)
-		}
-	case "x":
-		outFile := changeExt(m.filename, ".ansi")
-		if outFile == "" {
-			outFile = "art.ansi"
-		}
-		if err := exportANSI(m.canvas, outFile); err != nil {
-			m.statusMsg = fmt.Sprintf("Error exporting: %v", err)
-		} else {
-			m.statusMsg = fmt.Sprintf("Exported → %s", outFile)
-		}
+		m.saveMode = true
+		m.saveInput = defaultName
+		m.saveErrMsg = ""
 	case "i":
-		outFile := changeExt(m.filename, ".ansi")
-		if outFile == "" {
-			outFile = "art.ansi"
-		}
-		if err := exportANSI(m.canvas, outFile); err != nil {
-			m.statusMsg = fmt.Sprintf("Error exporting: %v", err)
-			break
-		}
-		if err := installToShell(outFile); err != nil {
-			m.statusMsg = fmt.Sprintf("Error installing: %v", err)
-		} else {
-			m.statusMsg = fmt.Sprintf("Installed! Restart terminal to see art. (file: %s)", outFile)
-		}
+		m.installConfirm = true
 
-	// Import plain text / braille file
+	// Import
 	case "r":
 		m.importMode = true
 		m.importIsImg = false
-		m.importInput = ""
+		m.importASCII = false
+		m.importInput = "~/"
 		m.statusMsg = ""
-
-	// Import image as colored ANSI art
 	case "g":
 		m.importMode = true
 		m.importIsImg = true
-		m.importInput = ""
+		m.importASCII = false
+		m.importInput = "~/"
 		m.statusMsg = ""
-
-	// Enter text writing mode
-	case "t":
-		m.textMode = true
-		m.textModeStartX = m.cursorX
+	case "a":
+		m.importMode = true
+		m.importIsImg = false
+		m.importASCII = true
+		m.importInput = "~/"
 		m.statusMsg = ""
 
 	default:
-		// Type a character to draw it
-		r := []rune(msg.String())
-		if len(r) == 1 && r[0] >= 32 && r[0] != 127 {
-			m.currentChar = r[0]
-			m.canvas.Set(m.cursorX, m.cursorY, Cell{
-				Char: r[0],
-				FG:   m.fgColor,
-				BG:   m.bgColor,
-			})
-			m.modified = true
-			if m.cursorX < m.canvas.Width-1 {
-				m.cursorX++
+		// Type a character to draw it — only in Draw tool mode.
+		if m.tool == ToolDraw {
+			r := []rune(msg.String())
+			if len(r) == 1 && r[0] >= 32 && r[0] != 127 {
+				m.currentChar = r[0]
+				m.canvas.Set(m.cursorX, m.cursorY, Cell{
+					Char: r[0],
+					FG:   m.fgColor,
+					BG:   m.bgColor,
+				})
+				m.modified = true
+				if m.cursorX < m.canvas.Width-1 {
+					m.cursorX++
+				}
 			}
 		}
 	}
@@ -285,165 +423,33 @@ func (m Model) applyTool(x, y int) Model {
 		m.canvas.Set(x, y, Cell{Char: m.currentChar, FG: m.fgColor, BG: m.bgColor})
 		m.modified = true
 	case ToolErase:
-		m.canvas.Set(x, y, Cell{Char: ' ', FG: ColorDefault, BG: ColorDefault})
+		m.canvas.Set(x, y, BlankCell)
 		m.modified = true
 	case ToolFill:
 		m.canvas.Fill(x, y, Cell{Char: m.currentChar, FG: m.fgColor, BG: m.bgColor})
 		m.modified = true
-	case ToolEyedropper:
-		cell := m.canvas.Get(x, y)
-		m.fgColor = cell.FG
-		m.bgColor = cell.BG
-		if cell.Char != ' ' && cell.Char != 0 {
-			m.currentChar = cell.Char
-		}
-		m.statusMsg = fmt.Sprintf("Picked: char='%s'  fg=%s  bg=%s",
-			string(cell.Char), ColorName(cell.FG), ColorName(cell.BG))
 	}
 	return m
 }
 
-func (m Model) handleColorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
+// ── Text mode ─────────────────────────────────────────────────────────────────
 
-	case "esc", "escape":
-		// Return to canvas WITHOUT applying the color
-		m.focus = FocusCanvas
-
-	case "enter":
-		// Apply selected color and return to canvas
-		m.applySelectedColor()
-		m.focus = FocusCanvas
-
-	case " ":
-		// Apply selected color, stay in panel
-		m.applySelectedColor()
-
-	case "up":
-		if m.colorCurY > 0 {
-			m.colorCurY--
-		}
-	case "down":
-		if m.colorCurY < 1 {
-			m.colorCurY++
-		}
-	case "left":
-		if m.colorCurX > 0 {
-			m.colorCurX--
-		}
-	case "right":
-		if m.colorCurX < 7 {
-			m.colorCurX++
-		}
-	case "f", "F":
-		m.focus = FocusFGColor
-		m.fgSelecting = true
-	case "b", "B":
-		m.focus = FocusBGColor
-		m.fgSelecting = false
-	case "tab":
-		m.focus = FocusChars
-	case "shift+tab":
-		m.focus = FocusCanvas
-	case "d":
-		// Set Default (no color) and return
-		if m.fgSelecting {
-			m.fgColor = ColorDefault
-		} else {
-			m.bgColor = ColorDefault
-		}
-		m.focus = FocusCanvas
-	}
-
-	// Sync focus with fgSelecting
-	if m.focus == FocusFGColor {
-		m.fgSelecting = true
-	} else if m.focus == FocusBGColor {
-		m.fgSelecting = false
-	}
-	return m, nil
-}
-
-// applySelectedColor sets fgColor or bgColor from the palette cursor position.
-func (m *Model) applySelectedColor() {
-	selected := Color(m.colorCurY*8 + m.colorCurX)
-	if m.fgSelecting {
-		m.fgColor = selected
-	} else {
-		m.bgColor = selected
-	}
-}
-
-func (m Model) handleCharKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc", "escape":
-		// Return without selecting
-		m.focus = FocusCanvas
-	case "enter", " ":
-		if m.charCurY < len(charPalette) && m.charCurX < len(charPalette[m.charCurY]) {
-			m.currentChar = charPalette[m.charCurY][m.charCurX]
-		}
-		m.focus = FocusCanvas
-	case "up":
-		if m.charCurY > 0 {
-			m.charCurY--
-			if m.charCurX >= len(charPalette[m.charCurY]) {
-				m.charCurX = len(charPalette[m.charCurY]) - 1
-			}
-		}
-	case "down":
-		if m.charCurY < len(charPalette)-1 {
-			m.charCurY++
-			if m.charCurX >= len(charPalette[m.charCurY]) {
-				m.charCurX = len(charPalette[m.charCurY]) - 1
-			}
-		}
-	case "left":
-		if m.charCurX > 0 {
-			m.charCurX--
-		}
-	case "right":
-		if m.charCurY < len(charPalette) && m.charCurX < len(charPalette[m.charCurY])-1 {
-			m.charCurX++
-		}
-	case "tab":
-		m.focus = FocusCanvas
-	case "shift+tab":
-		m.focus = FocusBGColor
-		m.fgSelecting = false
-	}
-	return m, nil
-}
-
-// handleTextKey handles keyboard events while in text writing mode.
-// All printable characters draw freely; only navigation/control keys are special.
 func (m Model) handleTextKey(msg tea.KeyMsg, vW, vH int) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
-
-	case "esc", "escape", "q":
-		// Exit text mode
+	case "esc", "escape":
 		m.textMode = false
 		m.statusMsg = ""
-
 	case "ctrl+s":
-		// Save still works in text mode
-		if m.filename == "" {
-			m.filename = "art.ansii"
+		defaultName := m.filename
+		if defaultName == "" {
+			defaultName = "art.ansii"
 		}
-		if err := saveCanvas(m.canvas, m.filename); err != nil {
-			m.statusMsg = fmt.Sprintf("Error saving: %v", err)
-		} else {
-			m.modified = false
-			m.statusMsg = fmt.Sprintf("Saved → %s", m.filename)
-		}
-
-	// Navigation — same as normal mode
+		m.textMode = false
+		m.saveMode = true
+		m.saveInput = defaultName
+		m.saveErrMsg = ""
 	case "up":
 		if m.cursorY > 0 {
 			m.cursorY--
@@ -460,29 +466,21 @@ func (m Model) handleTextKey(msg tea.KeyMsg, vW, vH int) (tea.Model, tea.Cmd) {
 		if m.cursorX < m.canvas.Width-1 {
 			m.cursorX++
 		}
-
-	// Enter: go to next line, return to the column where text mode started
 	case "enter":
 		if m.cursorY < m.canvas.Height-1 {
 			m.cursorY++
 		}
 		m.cursorX = m.textModeStartX
-
-	// Backspace: erase current cell and move left
 	case "backspace":
-		m.canvas.Set(m.cursorX, m.cursorY, Cell{Char: ' ', FG: ColorDefault, BG: ColorDefault})
+		m.canvas.Set(m.cursorX, m.cursorY, BlankCell)
 		m.modified = true
 		if m.cursorX > 0 {
 			m.cursorX--
 		}
-
-	// Delete: erase in place without moving
 	case "delete":
-		m.canvas.Set(m.cursorX, m.cursorY, Cell{Char: ' ', FG: ColorDefault, BG: ColorDefault})
+		m.canvas.Set(m.cursorX, m.cursorY, BlankCell)
 		m.modified = true
-
 	default:
-		// Draw ANY printable character (including d, e, f, s, q, etc.)
 		r := []rune(msg.String())
 		if len(r) == 1 && r[0] >= 32 && r[0] != 127 {
 			m.canvas.Set(m.cursorX, m.cursorY, Cell{
@@ -497,7 +495,6 @@ func (m Model) handleTextKey(msg tea.KeyMsg, vW, vH int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Scroll viewport to follow cursor
 	if m.cursorX < m.viewX {
 		m.viewX = m.cursorX
 	}
@@ -514,7 +511,142 @@ func (m Model) handleTextKey(msg tea.KeyMsg, vW, vH int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// changeExt changes file extension (or appends if no ext).
+// ── Char palette cycling ──────────────────────────────────────────────────────
+
+func prevChar(current rune) rune {
+	for i, r := range charPalette {
+		if r == current {
+			if i == 0 {
+				return charPalette[len(charPalette)-1]
+			}
+			return charPalette[i-1]
+		}
+	}
+	return charPalette[0]
+}
+
+func nextChar(current rune) rune {
+	for i, r := range charPalette {
+		if r == current {
+			if i == len(charPalette)-1 {
+				return charPalette[0]
+			}
+			return charPalette[i+1]
+		}
+	}
+	return charPalette[0]
+}
+
+// ── Path completion ───────────────────────────────────────────────────────────
+
+// completePath returns filesystem completions for the given path prefix.
+// Empty input or "~" lists the user's home directory.
+// Hidden files (names starting with ".") are never shown.
+// Directories are suffixed with /. Results are capped at 64.
+func completePath(prefix string) []string {
+	home, _ := os.UserHomeDir()
+
+	expanded := prefix
+	switch {
+	case expanded == "" || expanded == "~":
+		expanded = home + "/"
+	case strings.HasPrefix(expanded, "~/"):
+		if home != "" {
+			expanded = home + expanded[1:]
+		}
+	}
+
+	var dir, base string
+	if strings.HasSuffix(expanded, "/") {
+		dir, base = expanded, ""
+	} else {
+		dir = filepath.Dir(expanded)
+		base = filepath.Base(expanded)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var results []string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if base != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if e.IsDir() {
+			full += "/"
+		}
+		if home != "" && strings.HasPrefix(full, home+"/") {
+			full = "~/" + full[len(home)+1:]
+		}
+		results = append(results, full)
+		if len(results) == 64 {
+			break
+		}
+	}
+	return results
+}
+
+func cycleCompletion(completions []string, idx int, input string, dir int) ([]string, int) {
+	if len(completions) == 0 || strings.HasSuffix(input, "/") {
+		completions = completePath(input)
+		if dir > 0 {
+			idx = 0
+		} else {
+			idx = len(completions) - 1
+			if idx < 0 {
+				idx = 0
+			}
+		}
+		return completions, idx
+	}
+	n := len(completions)
+	idx = (idx + dir + n) % n
+	return completions, idx
+}
+
+func resolvePath(p string) string {
+	if len(p) >= 2 && p[:2] == "~/" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = home + p[1:]
+		}
+	}
+	try := func(candidate string) string {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		return ""
+	}
+	if c := try(p); c != "" {
+		return c
+	}
+	if c := try(filepath.Join("art", filepath.Base(p))); c != "" {
+		return c
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return p
+	}
+	exeDir := filepath.Dir(exe)
+	projectRoot := filepath.Dir(exeDir)
+	if c := try(filepath.Join(exeDir, p)); c != "" {
+		return c
+	}
+	if c := try(filepath.Join(projectRoot, p)); c != "" {
+		return c
+	}
+	if c := try(filepath.Join(projectRoot, "art", filepath.Base(p))); c != "" {
+		return c
+	}
+	return p
+}
+
 func changeExt(filename, newExt string) string {
 	if filename == "" {
 		return ""

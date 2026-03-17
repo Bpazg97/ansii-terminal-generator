@@ -8,34 +8,23 @@ import (
 type Tool int
 
 const (
-	ToolDraw       Tool = iota
+	ToolDraw  Tool = iota
 	ToolErase
 	ToolFill
-	ToolEyedropper
 )
 
 func (t Tool) String() string {
-	return [...]string{"Draw", "Erase", "Fill", "Eyedrop"}[t]
+	return [...]string{"Draw", "Erase", "Fill"}[t]
 }
 
-// Focus represents which UI panel has keyboard focus.
-type Focus int
-
-const (
-	FocusCanvas Focus = iota
-	FocusFGColor
-	FocusBGColor
-	FocusChars
+// charPalette is the selectable character set (cycled with [ / ]).
+var charPalette = []rune(
+	" █▓▒░▄▀▌▐■□▪▫" +
+		"─│┌┐└┘├┤┬┴┼═║" +
+		"╔╗╚╝╠╣╦╩╬▲▼◄►" +
+		"●○★☆♥♦♣♠◆◇♪♫☺" +
+		"/\\|-_=+*#@!?~",
 )
-
-// Character palette rows.
-var charPalette = [][]rune{
-	{' ', '█', '▓', '▒', '░', '▄', '▀', '▌', '▐', '■', '□', '▪', '▫'},
-	{'─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '═', '║'},
-	{'╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '╬', '▲', '▼', '◄', '►'},
-	{'●', '○', '★', '☆', '♥', '♦', '♣', '♠', '◆', '◇', '♪', '♫', '☺'},
-	{'/', '\\', '|', '-', '_', '=', '+', '*', '#', '@', '!', '?', '~'},
-}
 
 // Model is the main Bubbletea model.
 type Model struct {
@@ -50,13 +39,6 @@ type Model struct {
 	currentChar rune
 	tool        Tool
 
-	focus       Focus
-	colorCurX   int // color palette cursor
-	colorCurY   int
-	charCurX    int // char palette cursor
-	charCurY    int
-	fgSelecting bool // true=selecting FG in color panel, false=BG
-
 	filename  string
 	modified  bool
 	statusMsg string
@@ -64,13 +46,33 @@ type Model struct {
 
 	// Text writing mode — all printable keys draw freely
 	textMode       bool
-	textModeStartX int // column where text mode was activated (for Enter → new line)
+	textModeStartX int
 
-	// Import mode (text or image)
+	// Inline color-pick prompt ([c] for FG, [b] for BG)
+	// Input accepts 0-255 or "d" for default.
+	colorMode    bool
+	colorModeFG  bool // true = setting FG, false = BG
+	colorInput   string
+	colorErrMsg  string
+
+	// Import mode
 	importMode   bool
 	importInput  string
-	importIsImg  bool   // true = image import, false = text import
-	importErrMsg string // last error message (stays in import mode so user can fix path)
+	importIsImg  bool
+	importASCII  bool
+	importErrMsg string
+
+	// Save-as mode
+	saveMode   bool
+	saveInput  string
+	saveErrMsg string
+
+	// Install splash confirmation
+	installConfirm bool
+
+	// Tab-completion for import/save prompts
+	completions []string
+	compIdx     int
 
 	termW int
 	termH int
@@ -79,12 +81,10 @@ type Model struct {
 func newModel(canvasW, canvasH int) Model {
 	return Model{
 		canvas:      NewCanvas(canvasW, canvasH),
-		fgColor:     7,  // White
+		fgColor:     7, // White
 		bgColor:     ColorDefault,
 		currentChar: '█',
 		tool:        ToolDraw,
-		focus:       FocusCanvas,
-		fgSelecting: true,
 		termW:       120,
 		termH:       40,
 	}
@@ -95,10 +95,11 @@ func (m Model) Init() tea.Cmd {
 }
 
 // canvasViewSize returns the usable canvas display area given terminal size.
+// The sidebar is 22 cols wide (20 content + 2 border).
 func (m Model) canvasViewSize() (w, h int) {
-	sidebarW := 36
-	w = m.termW - sidebarW - 2 // box border adds 2; sidebar(36)+box(w+2)=termW
-	h = m.termH - 6 // title(1) + border-top(1) + label(1) + border-bot(1) + status(2)
+	sidebarW := 22
+	w = m.termW - sidebarW - 2 // canvas box border = 2; sidebar(22) + box(w+2) = termW
+	h = m.termH - 6            // title(1) + border-top(1) + label(1) + border-bot(1) + status(2)
 	if w < 10 {
 		w = 10
 	}

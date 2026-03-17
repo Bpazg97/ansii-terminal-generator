@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -14,9 +15,10 @@ func main() {
 		filename   = flag.String("f", "", "open or create a .ansii project file")
 		canvasW    = flag.Int("w", 60, "canvas width (new file)")
 		canvasH    = flag.Int("h", 30, "canvas height (new file)")
-		importFile = flag.String("import", "", "import a plain text/braille .txt file as canvas art")
-		importImg  = flag.String("img", "", "import an image (PNG/JPG) as colored ANSI art")
-		imgWidth   = flag.Int("imgw", 80, "target canvas width when importing an image")
+		importFile = flag.String("import", "", "import a plain text .txt file as canvas art")
+		importImg  = flag.String("img", "", "import an image (PNG/JPG) as colored half-block ANSI art")
+		imgWidth   = flag.Int("imgw", 80, "target canvas width when importing an image (columns)")
+		importJp2a = flag.String("ascii", "", "import an image as ASCII art (luminance→char, ANSI-256 colors)")
 		show       = flag.String("show", "", "display an .ansi file and exit (for shell splash)")
 		install    = flag.Bool("install", false, "re-install current splash to shell RC")
 	)
@@ -35,11 +37,26 @@ func main() {
 
 	// Install mode: install a given file (or default splash)
 	if *install {
-		path := *filename
-		if path == "" {
-			path = os.Getenv("HOME") + "/.config/ansii/splash.ansi"
+		var ansiPath string
+		if *filename != "" {
+			// If a .ansii project file is given, load and export it first.
+			// If a .ansi file is given, use it directly.
+			if filepath.Ext(*filename) == ".ansii" {
+				c, err := loadCanvas(*filename)
+				if err != nil {
+					log.Fatalf("could not load %s: %v", *filename, err)
+				}
+				ansiPath = changeExt(*filename, ".ansi")
+				if err := exportANSI(c, ansiPath); err != nil {
+					log.Fatalf("could not export %s: %v", ansiPath, err)
+				}
+			} else {
+				ansiPath = *filename
+			}
+		} else {
+			ansiPath = os.Getenv("HOME") + "/.config/ansii/splash.ansi"
 		}
-		if err := installToShell(path); err != nil {
+		if err := installToShell(ansiPath); err != nil {
 			log.Fatalf("install error: %v", err)
 		}
 		fmt.Println("Installed! Restart your terminal to see the splash art.")
@@ -70,14 +87,24 @@ func main() {
 		m.statusMsg = fmt.Sprintf("Imported '%s' (%dx%d) — add colors and press [s] to save", *importFile, c.Width, c.Height)
 	}
 
-	// Import image as colored ANSI art
+	// Import image as colored ANSI art (half-block)
 	if *importImg != "" {
 		c, err := importFromImage(*importImg, *imgWidth)
 		if err != nil {
 			log.Fatalf("could not import image %s: %v", *importImg, err)
 		}
 		m.canvas = c
-		m.statusMsg = fmt.Sprintf("Image imported (%dx%d) — press [s] to save, [i] to install", c.Width, c.Height)
+		m.statusMsg = fmt.Sprintf("Image imported (%dx%d, half-block) — press [s] to save, [i] to install", c.Width, c.Height)
+	}
+
+	// Import image as ASCII art
+	if *importJp2a != "" {
+		c, err := importFromASCII(*importJp2a, *imgWidth)
+		if err != nil {
+			log.Fatalf("could not import image as ASCII %s: %v", *importJp2a, err)
+		}
+		m.canvas = c
+		m.statusMsg = fmt.Sprintf("Image imported as ASCII (%dx%d) — press [s] to save, [i] to install", c.Width, c.Height)
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
