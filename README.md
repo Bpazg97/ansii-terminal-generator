@@ -185,7 +185,7 @@ The full workflow to show your art every time you open a terminal:
 ```
 1. Draw your character in the editor
 2. Press [i] inside the editor
-3. Open a new terminal → 🎮
+3. Open a new terminal → ansii
 ```
 
 When you press `i`, the editor:
@@ -306,9 +306,3 @@ cd editor/
 |---------|---------|
 | [Bubbletea](https://github.com/charmbracelet/bubbletea) | TUI framework (Elm architecture) |
 | [Lipgloss](https://github.com/charmbracelet/lipgloss) | Styles, colors, and layout |
-
----
-
-## License
-
-MIT
